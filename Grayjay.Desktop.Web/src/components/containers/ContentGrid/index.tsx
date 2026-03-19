@@ -1,4 +1,4 @@
-import { Component, createSignal, createMemo, Show, Switch, Match, batch, createEffect, onCleanup, onMount, Accessor } from "solid-js";
+import { Component, createSignal, createMemo, Show, Switch, Match, batch, createEffect, onCleanup, onMount, Accessor, untrack } from "solid-js";
 import styles from './index.module.css';
 import { Pager } from "../../../backend/models/pagers/Pager";
 import VideoThumbnailView from "../../content/VideoThumbnailView";
@@ -37,6 +37,7 @@ import Globals from "../../../globals";
 import LockedContentThumbnailView from "../../content/LockedContentThumbnailView";
 import { IPlatformLockedContent } from "../../../backend/models/content/IPlatformLockedContent";
 import { LocalBackend } from "../../../backend/LocalBackend";
+import { HistoryBackend } from "../../../backend/HistoryBackend";
 import { Event0, Event1 } from "../../../utility/Event";
 import { focusable } from "../../../focusable";import { InputSource } from "../../../nav";
 import { useFocus } from "../../../FocusProvider";
@@ -76,6 +77,33 @@ const ContentGrid: Component<ContentGridProps> = (props) => {
             }
         }
     }
+
+    const [positionMap$, setPositionMap] = createSignal<Record<string, number>>({});
+
+    const fetchPositionsForItems = async (items: IPlatformContent[]) => {
+        const videos = items.filter(item => item?.contentType === ContentType.MEDIA) as IPlatformVideo[];
+        if (videos.length === 0) return;
+        const entries = await Promise.all(
+            videos.map(async (v) => {
+                try {
+                    const pos = await HistoryBackend.getHistoricalPosition(v.url);
+                    return [v.url, pos] as [string, number];
+                } catch {
+                    return [v.url, 0] as [string, number];
+                }
+            })
+        );
+        setPositionMap(prev => ({ ...prev, ...Object.fromEntries(entries) }));
+    };
+
+    createEffect(() => {
+        const pager = props.pager;
+        setPositionMap({});
+        if (!pager) return;
+        const data = untrack(() => pager.dataFiltered);
+        if (data && data.length > 0)
+            fetchPositionsForItems([...data]);
+    });
 
     const [settingsContent$, setSettingsContent] = createSignal<IPlatformContent>();
     const [settingsMenuInputSource$, setSettingsMenuInputSource] = createSignal<InputSource>();
@@ -155,8 +183,10 @@ const ContentGrid: Component<ContentGridProps> = (props) => {
     let lastAddedItems: Event1<{ startIndex: number; endIndex: number }> | undefined;
     const attachAddedItems = (addedItems: Event1<{ startIndex: number; endIndex: number }> | undefined) => {
         lastAddedItems?.unregister(this);
-        addedItems?.registerOne(this, (_) => {
+        addedItems?.registerOne(this, ({ startIndex, endIndex }) => {
             dataFiltered0Counter = 0;
+            const data = props.pager?.dataFiltered;
+            if (data) fetchPositionsForItems(data.slice(startIndex, endIndex + 1));
         });
         lastAddedItems = addedItems;
     };
@@ -270,6 +300,7 @@ const ContentGrid: Component<ContentGridProps> = (props) => {
                         <>
                             <Show when={item()?.contentType == ContentType.MEDIA}>
                                 <VideoThumbnailView video={item() as IPlatformVideo}
+                                    position={(item() as IPlatformVideo)?.url ? positionMap$()[(item() as IPlatformVideo).url] : undefined}
                                     useCache={!!props?.useCache}
                                     onSettings={(e, content)=> onSettingsClicked(e, content, "pointer")}
                                     onAddtoQueue={(e, content)=>video?.actions.addToQueue(content as IPlatformVideo)}
